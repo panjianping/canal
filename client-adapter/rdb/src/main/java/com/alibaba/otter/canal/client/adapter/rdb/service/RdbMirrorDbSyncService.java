@@ -35,10 +35,11 @@ public class RdbMirrorDbSyncService {
     private RdbSyncService              rdbSyncService;                                                // rdbSyncService代理
 
     public RdbMirrorDbSyncService(Map<String, MirrorDbConfig> mirrorDbConfigCache, DataSource dataSource,
-                                  Integer threads, Map<String, Map<String, Integer>> columnsTypeCache){
+                                  Integer threads, Map<String, Map<String, Integer>> columnsTypeCache,
+                                  boolean skipDupException){
         this.mirrorDbConfigCache = mirrorDbConfigCache;
         this.dataSource = dataSource;
-        this.rdbSyncService = new RdbSyncService(dataSource, threads, columnsTypeCache);
+        this.rdbSyncService = new RdbSyncService(dataSource, threads, columnsTypeCache, skipDupException);
     }
 
     /**
@@ -47,62 +48,68 @@ public class RdbMirrorDbSyncService {
      * @param dmls 批量 DML
      */
     public void sync(List<Dml> dmls) {
-        try {
-            List<Dml> dmlList = new ArrayList<>();
-            for (Dml dml : dmls) {
-                String destination = StringUtils.trimToEmpty(dml.getDestination());
-                String database = dml.getDatabase();
-                MirrorDbConfig mirrorDbConfig = mirrorDbConfigCache.get(destination + "." + database);
+        List<Dml> dmlList = new ArrayList<>();
+        for (Dml dml : dmls) {
+            String destination = StringUtils.trimToEmpty(dml.getDestination());
+            String database = dml.getDatabase();
+            MirrorDbConfig mirrorDbConfig = mirrorDbConfigCache.get(destination + "." + database);
+            if (mirrorDbConfig == null) {
+                continue;
+            }
+            if (mirrorDbConfig.getMappingConfig() == null) {
+                continue;
+            }
+            if (dml.getGroupId() != null && StringUtils.isNotEmpty(mirrorDbConfig.getMappingConfig().getGroupId())) {
+                if (!mirrorDbConfig.getMappingConfig().getGroupId().equals(dml.getGroupId())) {
+                    continue; // 如果groupId不匹配则过滤
+                }
+            }
+
+            if (dml.getIsDdl() != null && dml.getIsDdl() && StringUtils.isNotEmpty(dml.getSql())) {
+                // DDL
+                if (logger.isDebugEnabled()) {
+                    logger.debug("DDL: {}", JSON.toJSONString(dml, SerializerFeature.WriteMapNullValue));
+                }
+                executeDdl(mirrorDbConfig, dml);
+                rdbSyncService.getColumnsTypeCache().remove(destination + "." + database + "." + dml.getTable());
+                mirrorDbConfig.getTableConfig().remove(dml.getTable()); // 删除对应库表配置
+            } else {
+                // DML
+                initMappingConfig(dml.getTable(), mirrorDbConfig.getMappingConfig(), mirrorDbConfig, dml);
+                dmlList.add(dml);
+            }
+        }
+        if (!dmlList.isEmpty()) {
+            rdbSyncService.sync(dmlList, dml -> {
+                MirrorDbConfig mirrorDbConfig = mirrorDbConfigCache.get(dml.getDestination() + "." + dml.getDatabase());
                 if (mirrorDbConfig == null) {
-                    continue;
+                    return false;
                 }
-                if (StringUtils.isNotEmpty(dml.getSql())) {
-                    // DDL
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("DDL: {}", JSON.toJSONString(dml, SerializerFeature.WriteMapNullValue));
-                    }
-                    executeDdl(mirrorDbConfig, dml);
-                    rdbSyncService.getColumnsTypeCache().remove(destination + "." + database + "." + dml.getTable());
-                    mirrorDbConfig.getTableConfig().remove(dml.getTable()); // 删除对应库表配置
+                String table = dml.getTable();
+                MappingConfig config = mirrorDbConfig.getTableConfig().get(table);
+
+                if (config == null) {
+                    return false;
+                }
+                // 是否区分大小写
+                boolean caseInsensitive = config.getDbMapping().isCaseInsensitive();
+                if (config.getConcurrent()) {
+                    List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml, caseInsensitive);
+                    singleDmls.forEach(singleDml -> {
+                        int hash = rdbSyncService.pkHash(config.getDbMapping(), singleDml.getData());
+                        RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
+                        rdbSyncService.getDmlsPartition()[hash].add(syncItem);
+                    });
                 } else {
-                    // DML
-                    initMappingConfig(dml.getTable(), mirrorDbConfig.getMappingConfig(), mirrorDbConfig, dml);
-                    dmlList.add(dml);
+                    int hash = 0;
+                    List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml, caseInsensitive);
+                    singleDmls.forEach(singleDml -> {
+                        RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
+                        rdbSyncService.getDmlsPartition()[hash].add(syncItem);
+                    });
                 }
-            }
-            if (!dmlList.isEmpty()) {
-                rdbSyncService.sync(dmlList, dml -> {
-                    MirrorDbConfig mirrorDbConfig = mirrorDbConfigCache
-                        .get(dml.getDestination() + "." + dml.getDatabase());
-                    String destination = StringUtils.trimToEmpty(dml.getDestination());
-                    String database = dml.getDatabase();
-                    String table = dml.getTable();
-                    MappingConfig config = mirrorDbConfig.getTableConfig().get(table);
-
-                    if (config == null) {
-                        return false;
-                    }
-
-                    if (config.getConcurrent()) {
-                        List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml);
-                        singleDmls.forEach(singleDml -> {
-                            int hash = rdbSyncService.pkHash(config.getDbMapping(), singleDml.getData());
-                            RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
-                            rdbSyncService.getDmlsPartition()[hash].add(syncItem);
-                        });
-                    } else {
-                        int hash = 0;
-                        List<SingleDml> singleDmls = SingleDml.dml2SingleDmls(dml);
-                        singleDmls.forEach(singleDml -> {
-                            RdbSyncService.SyncItem syncItem = new RdbSyncService.SyncItem(config, singleDml);
-                            rdbSyncService.getDmlsPartition()[hash].add(syncItem);
-                        });
-                    }
-                    return true;
-                });
-            }
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
+                return true;
+            });
         }
     }
 
@@ -120,6 +127,7 @@ public class RdbMirrorDbSyncService {
             mappingConfig = new MappingConfig();
             mappingConfig.setDataSourceKey(baseConfigMap.getDataSourceKey());
             mappingConfig.setDestination(baseConfigMap.getDestination());
+            mappingConfig.setGroupId(baseConfigMap.getGroupId());
             mappingConfig.setOuterAdapterKey(baseConfigMap.getOuterAdapterKey());
             mappingConfig.setConcurrent(baseConfigMap.getConcurrent());
             MappingConfig.DbMapping dbMapping = new MappingConfig.DbMapping();
@@ -152,7 +160,7 @@ public class RdbMirrorDbSyncService {
                 logger.trace("Execute DDL sql: {} for database: {}", ddl.getSql(), ddl.getDatabase());
             }
         } catch (Exception e) {
-            logger.error(e.getMessage(), e);
+            throw new RuntimeException(e);
         }
     }
 }

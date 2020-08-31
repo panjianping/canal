@@ -4,15 +4,22 @@ import java.io.Reader;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.sql.*;
+import java.sql.Blob;
+import java.sql.Clob;
+import java.sql.Date;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.sql.Types;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.apache.commons.lang.StringUtils;
-import org.joda.time.DateTime;
 
 import com.alibaba.otter.canal.client.adapter.rdb.config.MappingConfig;
+import com.alibaba.otter.canal.client.adapter.support.Util;
 
 public class SyncUtil {
 
@@ -86,9 +93,7 @@ public class SyncUtil {
                 }
                 break;
             case Types.TINYINT:
-                if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
-                    pstmt.setByte(i, (byte) value);
-                } else if (value instanceof Number) {
+                if (value instanceof Number) {
                     pstmt.setByte(i, ((Number) value).byteValue());
                 } else if (value instanceof String) {
                     pstmt.setByte(i, Byte.parseByte((String) value));
@@ -97,9 +102,7 @@ public class SyncUtil {
                 }
                 break;
             case Types.SMALLINT:
-                if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
-                    pstmt.setShort(i, (short) value);
-                } else if (value instanceof Number) {
+                if (value instanceof Number) {
                     pstmt.setShort(i, ((Number) value).shortValue());
                 } else if (value instanceof String) {
                     pstmt.setShort(i, Short.parseShort((String) value));
@@ -108,10 +111,7 @@ public class SyncUtil {
                 }
                 break;
             case Types.INTEGER:
-                if (value instanceof Byte || value instanceof Short || value instanceof Integer
-                    || value instanceof Long) {
-                    pstmt.setInt(i, (int) value);
-                } else if (value instanceof Number) {
+                if (value instanceof Number) {
                     pstmt.setInt(i, ((Number) value).intValue());
                 } else if (value instanceof String) {
                     pstmt.setInt(i, Integer.parseInt((String) value));
@@ -120,10 +120,7 @@ public class SyncUtil {
                 }
                 break;
             case Types.BIGINT:
-                if (value instanceof Byte || value instanceof Short || value instanceof Integer
-                    || value instanceof Long) {
-                    pstmt.setLong(i, (long) value);
-                } else if (value instanceof Number) {
+                if (value instanceof Number) {
                     pstmt.setLong(i, ((Number) value).longValue());
                 } else if (value instanceof String) {
                     pstmt.setLong(i, Long.parseLong((String) value));
@@ -136,13 +133,13 @@ public class SyncUtil {
                 if (value instanceof BigDecimal) {
                     pstmt.setBigDecimal(i, (BigDecimal) value);
                 } else if (value instanceof Byte) {
-                    pstmt.setInt(i, (int) value);
+                    pstmt.setInt(i, ((Byte) value).intValue());
                 } else if (value instanceof Short) {
-                    pstmt.setInt(i, (int) value);
+                    pstmt.setInt(i, ((Short) value).intValue());
                 } else if (value instanceof Integer) {
-                    pstmt.setInt(i, (int) value);
+                    pstmt.setInt(i, (Integer) value);
                 } else if (value instanceof Long) {
-                    pstmt.setLong(i, (long) value);
+                    pstmt.setLong(i, (Long) value);
                 } else if (value instanceof Float) {
                     pstmt.setBigDecimal(i, new BigDecimal((float) value));
                 } else if (value instanceof Double) {
@@ -154,10 +151,7 @@ public class SyncUtil {
                 }
                 break;
             case Types.REAL:
-                if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long
-                    || value instanceof Float || value instanceof Double) {
-                    pstmt.setFloat(i, (float) value);
-                } else if (value instanceof Number) {
+                if (value instanceof Number) {
                     pstmt.setFloat(i, ((Number) value).floatValue());
                 } else if (value instanceof String) {
                     pstmt.setFloat(i, Float.parseFloat((String) value));
@@ -167,10 +161,7 @@ public class SyncUtil {
                 break;
             case Types.FLOAT:
             case Types.DOUBLE:
-                if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long
-                    || value instanceof Float || value instanceof Double) {
-                    pstmt.setDouble(i, (double) value);
-                } else if (value instanceof Number) {
+                if (value instanceof Number) {
                     pstmt.setDouble(i, ((Number) value).doubleValue());
                 } else if (value instanceof String) {
                     pstmt.setDouble(i, Double.parseDouble((String) value));
@@ -212,11 +203,14 @@ public class SyncUtil {
                 } else if (value instanceof String) {
                     String v = (String) value;
                     if (!v.startsWith("0000-00-00")) {
-                        v = v.trim().replace(" ", "T");
-                        DateTime dt = new DateTime(v);
-                        pstmt.setDate(i, new Date(dt.toDate().getTime()));
+                        java.util.Date date = Util.parseDate(v);
+                        if (date != null) {
+                            pstmt.setDate(i, new Date(date.getTime()));
+                        } else {
+                            pstmt.setNull(i, type);
+                        }
                     } else {
-                        pstmt.setNull(i, type);
+                        pstmt.setObject(i, value);
                     }
                 } else {
                     pstmt.setNull(i, type);
@@ -229,9 +223,12 @@ public class SyncUtil {
                     pstmt.setTime(i, new java.sql.Time(((java.util.Date) value).getTime()));
                 } else if (value instanceof String) {
                     String v = (String) value;
-                    v = "T" + v;
-                    DateTime dt = new DateTime(v);
-                    pstmt.setTime(i, new Time(dt.toDate().getTime()));
+                    java.util.Date date = Util.parseDate(v);
+                    if (date != null) {
+                        pstmt.setTime(i, new Time(date.getTime()));
+                    } else {
+                        pstmt.setNull(i, type);
+                    }
                 } else {
                     pstmt.setNull(i, type);
                 }
@@ -244,11 +241,14 @@ public class SyncUtil {
                 } else if (value instanceof String) {
                     String v = (String) value;
                     if (!v.startsWith("0000-00-00")) {
-                        v = v.trim().replace(" ", "T");
-                        DateTime dt = new DateTime(v);
-                        pstmt.setTimestamp(i, new Timestamp(dt.toDate().getTime()));
+                        java.util.Date date = Util.parseDate(v);
+                        if (date != null) {
+                            pstmt.setTimestamp(i, new Timestamp(date.getTime()));
+                        } else {
+                            pstmt.setNull(i, type);
+                        }
                     } else {
-                        pstmt.setNull(i, type);
+                        pstmt.setObject(i, value);
                     }
                 } else {
                     pstmt.setNull(i, type);

@@ -20,37 +20,33 @@ import com.alibaba.otter.canal.client.adapter.support.Dml;
  */
 public class HbaseSyncService {
 
-    private Logger        logger = LoggerFactory.getLogger(this.getClass());
+    private static Logger logger = LoggerFactory.getLogger(HbaseSyncService.class);
 
-    private HbaseTemplate hbaseTemplate;                                    // HBase操作模板
+    private HbaseTemplate hbaseTemplate;                                           // HBase操作模板
 
     public HbaseSyncService(HbaseTemplate hbaseTemplate){
         this.hbaseTemplate = hbaseTemplate;
     }
 
     public void sync(MappingConfig config, Dml dml) {
-        try {
-            if (config != null) {
-                String type = dml.getType();
-                if (type != null && type.equalsIgnoreCase("INSERT")) {
-                    insert(config, dml);
-                } else if (type != null && type.equalsIgnoreCase("UPDATE")) {
-                    update(config, dml);
-                } else if (type != null && type.equalsIgnoreCase("DELETE")) {
-                    delete(config, dml);
-                }
-                if (logger.isDebugEnabled()) {
-                    logger.debug("DML: {}", JSON.toJSONString(dml, SerializerFeature.WriteMapNullValue));
-                }
+        if (config != null) {
+            String type = dml.getType();
+            if (type != null && type.equalsIgnoreCase("INSERT")) {
+                insert(config, dml);
+            } else if (type != null && type.equalsIgnoreCase("UPDATE")) {
+                update(config, dml);
+            } else if (type != null && type.equalsIgnoreCase("DELETE")) {
+                delete(config, dml);
             }
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
+            if (logger.isDebugEnabled()) {
+                logger.debug("DML: {}", JSON.toJSONString(dml, SerializerFeature.WriteMapNullValue));
+            }
         }
     }
 
     /**
      * 插入操作
-     * 
+     *
      * @param config 配置项
      * @param dml DML数据
      */
@@ -102,7 +98,7 @@ public class HbaseSyncService {
 
     /**
      * 将Map数据转换为HRow行数据
-     * 
+     *
      * @param hbaseMapping hbase映射配置
      * @param hRow 行对象
      * @param data Map数据
@@ -144,7 +140,7 @@ public class HbaseSyncService {
                                         Integer.parseInt((String) entry.getValue()));
                                     bytes = Bytes.toBytes(v);
                                 } catch (Exception e) {
-                                    // ignore
+                                    logger.error(e.getMessage(), e);
                                 }
                             }
                         }
@@ -160,7 +156,7 @@ public class HbaseSyncService {
 
     /**
      * 更新操作
-     * 
+     *
      * @param config 配置对象
      * @param dml dml对象
      */
@@ -204,8 +200,7 @@ public class HbaseSyncService {
                 String rowKeyVale = getRowKeys(rowKeyColumns, r);
                 rowKeyBytes = Bytes.toBytes(rowKeyVale);
             } else if (rowKeyColumn == null) {
-                Map<String, Object> rowKey = data.get(0);
-                rowKeyBytes = typeConvert(null, hbaseMapping, rowKey.values().iterator().next());
+                rowKeyBytes = typeConvert(null, hbaseMapping, r.values().iterator().next());
             } else {
                 rowKeyBytes = getRowKeyBytes(hbaseMapping, rowKeyColumn, r);
             }
@@ -289,8 +284,7 @@ public class HbaseSyncService {
                 rowKeyBytes = Bytes.toBytes(rowKeyVale);
             } else if (rowKeyColumn == null) {
                 // 如果不需要类型转换
-                Map<String, Object> rowKey = data.get(0);
-                rowKeyBytes = typeConvert(null, hbaseMapping, rowKey.values().iterator().next());
+                rowKeyBytes = typeConvert(null, hbaseMapping, r.values().iterator().next());
             } else {
                 rowKeyBytes = getRowKeyBytes(hbaseMapping, rowKeyColumn, r);
             }
@@ -380,7 +374,7 @@ public class HbaseSyncService {
 
     /**
      * 根据对应的类型进行转换
-     * 
+     *
      * @param columnItem 列项配置
      * @param hbaseMapping hbase映射配置
      * @param value 值

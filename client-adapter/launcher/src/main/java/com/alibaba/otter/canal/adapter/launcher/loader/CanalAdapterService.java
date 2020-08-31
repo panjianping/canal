@@ -7,6 +7,8 @@ import javax.annotation.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.cloud.context.config.annotation.RefreshScope;
+import org.springframework.cloud.context.refresh.ContextRefresher;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import com.alibaba.druid.pool.DruidDataSource;
@@ -30,7 +32,12 @@ public class CanalAdapterService {
     private CanalAdapterLoader  adapterLoader;
 
     @Resource
+    private ContextRefresher    contextRefresher;
+
+    @Resource
     private AdapterCanalConfig  adapterCanalConfig;
+    @Resource
+    private Environment         env;
 
     // 注入bean保证优先注册
     @Resource
@@ -46,6 +53,8 @@ public class CanalAdapterService {
             return;
         }
         try {
+            syncSwitch.refresh();
+            logger.info("## syncSwitch refreshed.");
             logger.info("## start the canal client adapters.");
             adapterLoader = new CanalAdapterLoader(adapterCanalConfig);
             adapterLoader.init();
@@ -64,6 +73,7 @@ public class CanalAdapterService {
         try {
             running = false;
             logger.info("## stop the canal client adapters");
+
             if (adapterLoader != null) {
                 adapterLoader.destroy();
                 adapterLoader = null;

@@ -5,10 +5,10 @@ import java.sql.SQLException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 
-import javax.sql.DataSource;
-
+import org.apache.commons.lang.BooleanUtils;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,7 +23,11 @@ import com.alibaba.otter.canal.client.adapter.rdb.service.RdbEtlService;
 import com.alibaba.otter.canal.client.adapter.rdb.service.RdbMirrorDbSyncService;
 import com.alibaba.otter.canal.client.adapter.rdb.service.RdbSyncService;
 import com.alibaba.otter.canal.client.adapter.rdb.support.SyncUtil;
-import com.alibaba.otter.canal.client.adapter.support.*;
+import com.alibaba.otter.canal.client.adapter.support.Dml;
+import com.alibaba.otter.canal.client.adapter.support.EtlResult;
+import com.alibaba.otter.canal.client.adapter.support.OuterAdapterConfig;
+import com.alibaba.otter.canal.client.adapter.support.SPI;
+import com.alibaba.otter.canal.client.adapter.support.Util;
 
 /**
  * RDB适配器实现类
@@ -47,6 +51,8 @@ public class RdbAdapter implements OuterAdapter {
 
     private RdbConfigMonitor                        rdbConfigMonitor;
 
+    private Properties                              envProperties;
+
     public Map<String, MappingConfig> getRdbMapping() {
         return rdbMapping;
     }
@@ -65,31 +71,43 @@ public class RdbAdapter implements OuterAdapter {
      * @param configuration 外部适配器配置信息
      */
     @Override
-    public void init(OuterAdapterConfig configuration) {
-        Map<String, MappingConfig> rdbMappingTmp = ConfigLoader.load();
+    public void init(OuterAdapterConfig configuration, Properties envProperties) {
+        this.envProperties = envProperties;
+        Map<String, MappingConfig> rdbMappingTmp = ConfigLoader.load(envProperties);
         // 过滤不匹配的key的配置
         rdbMappingTmp.forEach((key, mappingConfig) -> {
             if ((mappingConfig.getOuterAdapterKey() == null && configuration.getKey() == null)
-                || (mappingConfig.getOuterAdapterKey() != null
-                    && mappingConfig.getOuterAdapterKey().equalsIgnoreCase(configuration.getKey()))) {
+                || (mappingConfig.getOuterAdapterKey() != null && mappingConfig.getOuterAdapterKey()
+                    .equalsIgnoreCase(configuration.getKey()))) {
                 rdbMapping.put(key, mappingConfig);
             }
         });
+
+        if (rdbMapping.isEmpty()) {
+            throw new RuntimeException("No rdb adapter found for config key: " + configuration.getKey());
+        }
+
         for (Map.Entry<String, MappingConfig> entry : rdbMapping.entrySet()) {
             String configName = entry.getKey();
             MappingConfig mappingConfig = entry.getValue();
             if (!mappingConfig.getDbMapping().getMirrorDb()) {
-                Map<String, MappingConfig> configMap = mappingConfigCache.computeIfAbsent(
-                    StringUtils.trimToEmpty(mappingConfig.getDestination()) + "." + mappingConfig.getDbMapping()
-                        .getDatabase() + "." + mappingConfig.getDbMapping().getTable(),
+                String key;
+                if (envProperties != null && !"tcp".equalsIgnoreCase(envProperties.getProperty("canal.conf.mode"))) {
+                    key = StringUtils.trimToEmpty(mappingConfig.getDestination()) + "-"
+                          + StringUtils.trimToEmpty(mappingConfig.getGroupId()) + "_"
+                          + mappingConfig.getDbMapping().getDatabase() + "-" + mappingConfig.getDbMapping().getTable();
+                } else {
+                    key = StringUtils.trimToEmpty(mappingConfig.getDestination()) + "_"
+                          + mappingConfig.getDbMapping().getDatabase() + "-" + mappingConfig.getDbMapping().getTable();
+                }
+                Map<String, MappingConfig> configMap = mappingConfigCache.computeIfAbsent(key,
                     k1 -> new ConcurrentHashMap<>());
                 configMap.put(configName, mappingConfig);
             } else {
                 // mirrorDB
-
-                mirrorDbConfigCache.put(StringUtils.trimToEmpty(mappingConfig.getDestination()) + "."
-                                        + mappingConfig.getDbMapping().getDatabase(),
-                        MirrorDbConfig.create(configName, mappingConfig));
+                String key = StringUtils.trimToEmpty(mappingConfig.getDestination()) + "."
+                             + mappingConfig.getDbMapping().getDatabase();
+                mirrorDbConfigCache.put(key, MirrorDbConfig.create(configName, mappingConfig));
             }
         }
 
@@ -102,10 +120,14 @@ public class RdbAdapter implements OuterAdapter {
         dataSource.setPassword(properties.get("jdbc.password"));
         dataSource.setInitialSize(1);
         dataSource.setMinIdle(1);
-        dataSource.setMaxActive(10);
+        dataSource.setMaxActive(30);
         dataSource.setMaxWait(60000);
         dataSource.setTimeBetweenEvictionRunsMillis(60000);
         dataSource.setMinEvictableIdleTimeMillis(300000);
+        dataSource.setUseUnfairLock(true);
+        // List<String> array = new ArrayList<>();
+        // array.add("set names utf8mb4;");
+        // dataSource.setConnectionInitSqls(array);
 
         try {
             dataSource.init();
@@ -116,15 +138,20 @@ public class RdbAdapter implements OuterAdapter {
         String threads = properties.get("threads");
         // String commitSize = properties.get("commitSize");
 
-        rdbSyncService = new RdbSyncService(dataSource, threads != null ? Integer.valueOf(threads) : null);
+        boolean skipDupException = BooleanUtils.toBoolean(configuration.getProperties()
+            .getOrDefault("skipDupException", "true"));
+        rdbSyncService = new RdbSyncService(dataSource,
+            threads != null ? Integer.valueOf(threads) : null,
+            skipDupException);
 
         rdbMirrorDbSyncService = new RdbMirrorDbSyncService(mirrorDbConfigCache,
             dataSource,
             threads != null ? Integer.valueOf(threads) : null,
-            rdbSyncService.getColumnsTypeCache());
+            rdbSyncService.getColumnsTypeCache(),
+            skipDupException);
 
         rdbConfigMonitor = new RdbConfigMonitor();
-        rdbConfigMonitor.init(configuration.getKey(), this);
+        rdbConfigMonitor.init(configuration.getKey(), this, envProperties);
     }
 
     /**
@@ -134,21 +161,14 @@ public class RdbAdapter implements OuterAdapter {
      */
     @Override
     public void sync(List<Dml> dmls) {
-        ExecutorService executorService = Executors.newFixedThreadPool(2);
-
-        Future<Boolean> future1 = executorService.submit(() -> {
-            rdbSyncService.sync(mappingConfigCache, dmls);
-            return true;
-        });
-        Future<Boolean> future2 = executorService.submit(() -> {
-            rdbMirrorDbSyncService.sync(dmls);
-            return true;
-        });
+        if (dmls == null || dmls.isEmpty()) {
+            return;
+        }
         try {
-            future1.get();
-            future2.get();
-        } catch (ExecutionException | InterruptedException e) {
-            // ignore
+            rdbSyncService.sync(mappingConfigCache, dmls, envProperties);
+            rdbMirrorDbSyncService.sync(dmls);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -163,27 +183,16 @@ public class RdbAdapter implements OuterAdapter {
     public EtlResult etl(String task, List<String> params) {
         EtlResult etlResult = new EtlResult();
         MappingConfig config = rdbMapping.get(task);
+        RdbEtlService rdbEtlService = new RdbEtlService(dataSource, config);
         if (config != null) {
-            DataSource srcDataSource = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
-            if (srcDataSource != null) {
-                return RdbEtlService.importData(srcDataSource, dataSource, config, params);
-            } else {
-                etlResult.setSucceeded(false);
-                etlResult.setErrorMessage("DataSource not found");
-                return etlResult;
-            }
+            return rdbEtlService.importData(params);
         } else {
             StringBuilder resultMsg = new StringBuilder();
             boolean resSucc = true;
-            // ds不为空说明传入的是destination
             for (MappingConfig configTmp : rdbMapping.values()) {
                 // 取所有的destination为task的配置
                 if (configTmp.getDestination().equals(task)) {
-                    DataSource srcDataSource = DatasourceConfig.DATA_SOURCES.get(configTmp.getDataSourceKey());
-                    if (srcDataSource == null) {
-                        continue;
-                    }
-                    EtlResult etlRes = RdbEtlService.importData(srcDataSource, dataSource, configTmp, params);
+                    EtlResult etlRes = rdbEtlService.importData(params);
                     if (!etlRes.getSucceeded()) {
                         resSucc = false;
                         resultMsg.append(etlRes.getErrorMessage()).append("\n");

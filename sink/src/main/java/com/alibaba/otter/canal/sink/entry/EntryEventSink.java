@@ -100,11 +100,16 @@ public class EntryEventSink extends AbstractCanalEventSink<List<CanalEntry.Entry
                 && (entry.getEntryType() == EntryType.TRANSACTIONBEGIN || entry.getEntryType() == EntryType.TRANSACTIONEND)) {
                 long currentTimestamp = entry.getHeader().getExecuteTime();
                 // 基于一定的策略控制，放过空的事务头和尾，便于及时更新数据库位点，表明工作正常
-                if (Math.abs(currentTimestamp - lastTransactionTimestamp) > emptyTransactionInterval
-                    || lastTransactionCount.incrementAndGet() > emptyTransctionThresold) {
-                    lastTransactionCount.set(0L);
-                    lastTransactionTimestamp = currentTimestamp;
+                if (lastTransactionCount.incrementAndGet() <= emptyTransctionThresold
+                    && Math.abs(currentTimestamp - lastTransactionTimestamp) <= emptyTransactionInterval) {
                     continue;
+                } else {
+                    // fixed issue https://github.com/alibaba/canal/issues/2616
+                    // 主要原因在于空事务只发送了begin，没有同步发送commit信息，这里修改为只对commit事件做计数更新，确保begin/commit成对出现
+                    if (entry.getEntryType() == EntryType.TRANSACTIONEND) {
+                        lastTransactionCount.set(0L);
+                        lastTransactionTimestamp = currentTimestamp;
+                    }
                 }
             }
 

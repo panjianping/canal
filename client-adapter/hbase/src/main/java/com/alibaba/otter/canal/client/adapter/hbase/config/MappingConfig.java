@@ -1,5 +1,7 @@
 package com.alibaba.otter.canal.client.adapter.hbase.config;
 
+import com.alibaba.otter.canal.client.adapter.support.AdapterConfig;
+
 import java.util.*;
 
 /**
@@ -8,11 +10,13 @@ import java.util.*;
  * @author rewerma 2018-8-21 下午06:45:49
  * @version 1.0.0
  */
-public class MappingConfig {
+public class MappingConfig implements AdapterConfig {
 
     private String       dataSourceKey;   // 数据源key
 
     private String       outerAdapterKey; // adapter key
+
+    private String       groupId;         // groupId
 
     private String       destination;     // canal实例或MQ的topic
 
@@ -24,6 +28,14 @@ public class MappingConfig {
 
     public void setDataSourceKey(String dataSourceKey) {
         this.dataSourceKey = dataSourceKey;
+    }
+
+    public String getGroupId() {
+        return groupId;
+    }
+
+    public void setGroupId(String groupId) {
+        this.groupId = groupId;
     }
 
     public String getOuterAdapterKey() {
@@ -48,6 +60,10 @@ public class MappingConfig {
 
     public void setHbaseMapping(HbaseMapping hbaseMapping) {
         this.hbaseMapping = hbaseMapping;
+    }
+
+    public AdapterMapping getMapping() {
+        return hbaseMapping;
     }
 
     public void validate() {
@@ -169,7 +185,7 @@ public class MappingConfig {
         }
     }
 
-    public static class HbaseMapping {
+    public static class HbaseMapping implements AdapterMapping {
 
         private Mode                    mode               = Mode.STRING;           // hbase默认转换格式
         private String                  database;                                   // 数据库名或schema名
